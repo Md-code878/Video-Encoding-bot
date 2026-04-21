@@ -66,17 +66,26 @@ async def _pick_encoder(codec: str) -> tuple[str, list[str], bool]:
     gpu_variant = codec_cfg.get("gpu", {})
     cpu_variant = codec_cfg["cpu"]
 
-    # Try GPU if available and the specific NVENC encoder is supported
+    # Try GPU if available and the specific NVENC encoder verified working
     if (
         gpu_info["available"]
         and gpu_variant
         and gpu_variant["encoder"] in gpu_info["nvenc_encoders"]
     ):
         logger.info(f"Using GPU encoder: {gpu_variant['encoder']}")
-        return gpu_variant["encoder"], gpu_variant["params"], True
+        return gpu_variant["encoder"], list(gpu_variant["params"]), True
 
     logger.info(f"Using CPU encoder: {cpu_variant['encoder']}")
-    return cpu_variant["encoder"], cpu_variant["params"], False
+    return cpu_variant["encoder"], list(cpu_variant["params"]), False
+
+
+def _build_scale_filter(w: int, h: int) -> str:
+    """Build a CPU scale + pad filter string (works everywhere)."""
+    return (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"setsar=1"
+    )
 
 
 async def encode_video(
@@ -88,7 +97,11 @@ async def encode_video(
 ) -> tuple[bool, str]:
     """
     Encode a video with the given codec and optional upscale resolution.
-    Automatically uses GPU (NVENC) if available, CPU otherwise.
+    Automatically uses GPU (NVENC) for encoding if available, CPU otherwise.
+
+    Strategy: CPU decode + GPU/CPU encode. This is the most compatible
+    approach — NVENC encoding is the bottleneck anyway, so GPU encoding
+    alone gives the bulk of the speedup without CUDA filter headaches.
 
     Returns (success: bool, message: str).
     """
@@ -99,56 +112,22 @@ async def encode_video(
 
     hw_label = "GPU" if is_gpu else "CPU"
 
-    # Build ffmpeg command
-    cmd = [Config.FFMPEG_PATH, "-y"]
+    # Build ffmpeg command — NO hwaccel flags, just GPU encoding
+    cmd = [Config.FFMPEG_PATH, "-y", "-i", input_path]
 
-    # For NVENC, use hwaccel for decoding too (optional but faster)
-    if is_gpu:
-        cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-
-    cmd += ["-i", input_path]
-
-    # Video filters (upscaling)
-    vf_filters = []
+    # Video filters (standard CPU scale — works with both GPU and CPU encoding)
     if resolution:
         res = Config.RESOLUTIONS.get(resolution)
         if not res:
             return False, f"Unknown resolution: {resolution}"
         w, h = res
-
-        if is_gpu:
-            # Use NVIDIA's hardware scaler on GPU
-            # Need to upload to GPU if not already there, scale, then download
-            vf_filters.append(
-                f"scale_cuda={w}:{h}:force_original_aspect_ratio=decrease"
-            )
-            # Pad on GPU isn't available in scale_cuda, so we need a mixed approach
-            # Use hwdownload + pad + hwupload, or just use scale_cuda with specific dims
-            # Simpler: force exact dimensions with scale_cuda
-            vf_filters = [
-                f"scale_cuda={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2"
-            ]
-        else:
-            vf_filters.append(
-                f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-                f"setsar=1"
-            )
-
-    if is_gpu and not vf_filters:
-        # No scaling needed but we're using cuda hwaccel — no filter needed,
-        # NVENC can encode from cuda frames directly
-        pass
-    elif is_gpu and vf_filters:
-        cmd += ["-vf", ",".join(vf_filters)]
-    elif vf_filters:
-        cmd += ["-vf", ",".join(vf_filters)]
+        cmd += ["-vf", _build_scale_filter(w, h)]
 
     # Codec settings
     cmd += ["-c:v", encoder_name]
     cmd += encoder_params
 
-    # Audio: copy or re-encode to opus
+    # Audio: re-encode to opus
     cmd += ["-c:a", "libopus", "-b:a", "128k"]
 
     # Subtitle copy (if container supports)
@@ -206,8 +185,9 @@ async def encode_video(
         # If GPU encoding failed, retry with CPU fallback
         if is_gpu:
             logger.warning(
-                f"GPU encoding failed (code {proc.returncode}), falling back to CPU"
+                f"GPU encoding failed (code {proc.returncode}): {err[-200:]}"
             )
+            logger.info("Retrying with CPU encoder...")
             return await _encode_cpu_fallback(
                 input_path, output_path, codec, resolution, progress_callback
             )
@@ -248,12 +228,7 @@ async def _encode_cpu_fallback(
         res = Config.RESOLUTIONS.get(resolution)
         if res:
             w, h = res
-            cmd += [
-                "-vf",
-                f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-                f"setsar=1",
-            ]
+            cmd += ["-vf", _build_scale_filter(w, h)]
 
     cmd += ["-c:v", cpu["encoder"]]
     cmd += cpu["params"]

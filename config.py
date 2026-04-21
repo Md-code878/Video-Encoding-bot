@@ -42,10 +42,8 @@ class Config:
             "gpu": {
                 "encoder": "h264_nvenc",
                 "params": [
-                    "-preset", "p4",       # balanced speed/quality
-                    "-rc", "vbr",
+                    "-preset", "p4",
                     "-cq", "24",
-                    "-b:v", "0",
                     "-pix_fmt", "yuv420p",
                 ],
             },
@@ -61,10 +59,8 @@ class Config:
                 "encoder": "hevc_nvenc",
                 "params": [
                     "-preset", "p4",
-                    "-rc", "vbr",
                     "-cq", "26",
-                    "-b:v", "0",
-                    "-pix_fmt", "p010le",  # 10-bit
+                    "-pix_fmt", "yuv420p",
                 ],
             },
             "cpu": {
@@ -79,10 +75,8 @@ class Config:
                 "encoder": "av1_nvenc",
                 "params": [
                     "-preset", "p4",
-                    "-rc", "vbr",
                     "-cq", "30",
-                    "-b:v", "0",
-                    "-pix_fmt", "p010le",
+                    "-pix_fmt", "yuv420p",
                 ],
             },
             "cpu": {
