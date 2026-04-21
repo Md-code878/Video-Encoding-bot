@@ -51,7 +51,7 @@ A powerful open-source Telegram bot that encodes videos to **AV1** or **H.265 (H
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/telegram-video-bot.git
+   git clone https://github.com/Md-code8798/telegram-video-bot.git
    cd telegram-video-bot
    ```
 
