@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.session
+*.session-journal
+downloads/
+bot.log
+config.env
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/

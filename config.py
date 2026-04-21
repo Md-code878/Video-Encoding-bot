@@ -1,0 +1,47 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv("config.env")
+
+
+class Config:
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+    API_ID = int(os.getenv("API_ID", "0"))
+    API_HASH = os.getenv("API_HASH", "")
+
+    ADMIN_IDS = [
+        int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()
+    ]
+
+    MONGO_URI = os.getenv("MONGO_URI", "")
+    DB_NAME = os.getenv("DB_NAME", "videoencoderbot")
+
+    LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", "0"))
+
+    FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
+    FFPROBE_PATH = os.getenv("FFPROBE_PATH", "ffprobe")
+
+    MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 2147483648))
+    MAX_WORKERS = int(os.getenv("MAX_WORKERS", 2))
+    TEMP_DIR = os.getenv("TEMP_DIR", "./downloads")
+
+    # Encoding presets
+    RESOLUTIONS = {
+        "1080p": (1920, 1080),
+        "2k": (2560, 1440),
+        "4k": (3840, 2160),
+        "8k": (7680, 4320),
+    }
+
+    CODECS = {
+        "av1": {
+            "encoder": "libsvtav1",
+            "params": ["-crf", "30", "-preset", "6", "-pix_fmt", "yuv420p10le"],
+            "ext": "mkv",
+        },
+        "hevc": {
+            "encoder": "libx265",
+            "params": ["-crf", "24", "-preset", "medium", "-pix_fmt", "yuv420p10le"],
+            "ext": "mkv",
+        },
+    }
