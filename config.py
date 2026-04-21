@@ -33,15 +33,63 @@ class Config:
         "8k": (7680, 4320),
     }
 
+    # ── Codec Definitions ────────────────────────────────────────────
+    # Each codec has a "gpu" variant (NVENC) and a "cpu" fallback.
+    # The encoder picks GPU if available, otherwise falls back to CPU.
+
     CODECS = {
-        "av1": {
-            "encoder": "libsvtav1",
-            "params": ["-crf", "30", "-preset", "6", "-pix_fmt", "yuv420p10le"],
+        "h264": {
+            "gpu": {
+                "encoder": "h264_nvenc",
+                "params": [
+                    "-preset", "p4",       # balanced speed/quality
+                    "-rc", "vbr",
+                    "-cq", "24",
+                    "-b:v", "0",
+                    "-pix_fmt", "yuv420p",
+                ],
+            },
+            "cpu": {
+                "encoder": "libx264",
+                "params": ["-crf", "23", "-preset", "medium", "-pix_fmt", "yuv420p"],
+            },
             "ext": "mkv",
+            "label": "H.264",
         },
         "hevc": {
-            "encoder": "libx265",
-            "params": ["-crf", "24", "-preset", "medium", "-pix_fmt", "yuv420p10le"],
+            "gpu": {
+                "encoder": "hevc_nvenc",
+                "params": [
+                    "-preset", "p4",
+                    "-rc", "vbr",
+                    "-cq", "26",
+                    "-b:v", "0",
+                    "-pix_fmt", "p010le",  # 10-bit
+                ],
+            },
+            "cpu": {
+                "encoder": "libx265",
+                "params": ["-crf", "24", "-preset", "medium", "-pix_fmt", "yuv420p10le"],
+            },
             "ext": "mkv",
+            "label": "H.265 (HEVC)",
+        },
+        "av1": {
+            "gpu": {
+                "encoder": "av1_nvenc",
+                "params": [
+                    "-preset", "p4",
+                    "-rc", "vbr",
+                    "-cq", "30",
+                    "-b:v", "0",
+                    "-pix_fmt", "p010le",
+                ],
+            },
+            "cpu": {
+                "encoder": "libsvtav1",
+                "params": ["-crf", "30", "-preset", "6", "-pix_fmt", "yuv420p10le"],
+            },
+            "ext": "mkv",
+            "label": "AV1",
         },
     }

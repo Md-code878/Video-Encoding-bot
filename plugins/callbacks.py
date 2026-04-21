@@ -74,13 +74,14 @@ def register_callbacks(app: Client):
         await query.message.edit_text(
             "🔄 **Select Default Codec:**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("H.265 (HEVC)", callback_data="codec_hevc"),
-                 InlineKeyboardButton("AV1", callback_data="codec_av1")],
+                [InlineKeyboardButton("H.264", callback_data="codec_h264"),
+                 InlineKeyboardButton("H.265 (HEVC)", callback_data="codec_hevc")],
+                [InlineKeyboardButton("AV1", callback_data="codec_av1")],
                 [InlineKeyboardButton("🔙 Back", callback_data="settings")],
             ]),
         )
 
-    @app.on_callback_query(filters.regex(r"^codec_(hevc|av1)$"))
+    @app.on_callback_query(filters.regex(r"^codec_(h264|hevc|av1)$"))
     async def codec_select_cb(client: Client, query: CallbackQuery):
         codec = query.data.split("_")[1]
         await db.set_user_codec(query.from_user.id, codec)
@@ -140,7 +141,7 @@ def register_callbacks(app: Client):
 
     # ── Encode/Upscale Callbacks (from video handler) ────────────────
 
-    @app.on_callback_query(filters.regex(r"^enc_(hevc|av1)_(none|1080p|2k|4k|8k)$"))
+    @app.on_callback_query(filters.regex(r"^enc_(h264|hevc|av1)_(none|1080p|2k|4k|8k)$"))
     async def encode_cb(client: Client, query: CallbackQuery):
         """Triggered when user picks codec + resolution from video handler."""
         parts = query.data.split("_")

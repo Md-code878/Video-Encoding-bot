@@ -46,8 +46,9 @@ def register_commands(app: Client):
             f"👋 **Hello {user.first_name}!**\n\n"
             "I'm a **Video Encoder & Upscaler Bot** powered by FFmpeg.\n\n"
             "**What I can do:**\n"
-            "• Encode video to **AV1** or **H.265 (HEVC)**\n"
-            "• Upscale video to **1080p / 2K / 4K / 8K**\n\n"
+            "• Encode video to **H.264**, **H.265 (HEVC)**, or **AV1**\n"
+            "• Upscale video to **1080p / 2K / 4K / 8K**\n"
+            "• 🚀 **GPU acceleration** on NVIDIA (Google Colab)\n\n"
             "**How to use:**\n"
             "1️⃣ Send me a video file\n"
             "2️⃣ Choose codec & resolution\n"
@@ -216,13 +217,27 @@ def register_commands(app: Client):
         mem = psutil.virtual_memory()
         disk = shutil.disk_usage("/")
         from utils.helpers import humanbytes
+        from utils.gpu import get_cached_gpu_info, detect_gpu
+
+        gpu_info = get_cached_gpu_info()
+        if gpu_info is None:
+            gpu_info = await detect_gpu()
+
+        if gpu_info["available"]:
+            gpu_text = (
+                f"🚀 **GPU:** {gpu_info['gpu_name']}\n"
+                f"**NVENC:** {', '.join(gpu_info['nvenc_encoders'])}\n"
+            )
+        else:
+            gpu_text = "⚙️ **GPU:** Not detected (CPU mode)\n"
 
         await message.reply_text(
             "🖥️ **System Status**\n\n"
             f"**CPU:** {cpu}%\n"
             f"**RAM:** {humanbytes(mem.used)} / {humanbytes(mem.total)} ({mem.percent}%)\n"
             f"**Disk:** {humanbytes(disk.used)} / {humanbytes(disk.total)}\n"
-            f"**Workers:** {Config.MAX_WORKERS}\n"
+            f"**Workers:** {Config.MAX_WORKERS}\n\n"
+            f"{gpu_text}"
         )
 
     @app.on_message(filters.command("logs") & filters.private)

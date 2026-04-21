@@ -4,6 +4,7 @@ Telegram Video Encoder & Upscaler Bot
 Encode videos to AV1/HEVC and upscale to 1080p/2K/4K/8K using FFmpeg.
 """
 
+import asyncio
 import os
 import logging
 from pyrogram import Client
@@ -12,6 +13,7 @@ from config import Config
 from commands import register_commands
 from plugins.callbacks import register_callbacks
 from plugins.video_handler import register_video_handler
+from utils.gpu import detect_gpu
 
 # ── Logging ──────────────────────────────────────────────────────────
 
@@ -46,6 +48,16 @@ register_video_handler(app)
 
 # ── Start ────────────────────────────────────────────────────────────
 
+async def _startup_gpu_check():
+    """Detect GPU at startup and log results."""
+    gpu = await detect_gpu()
+    if gpu["available"]:
+        logger.info(f"🚀 GPU detected: {gpu['gpu_name']}")
+        logger.info(f"🚀 NVENC encoders: {gpu['nvenc_encoders']}")
+    else:
+        logger.info("⚙️ No GPU detected — using CPU encoders")
+
+
 if __name__ == "__main__":
     logger.info("Starting Video Encoder Bot...")
     logger.info(f"Admins: {Config.ADMIN_IDS}")
@@ -53,4 +65,8 @@ if __name__ == "__main__":
     logger.info(f"Temp dir: {Config.TEMP_DIR}")
     logger.info(f"Available codecs: {list(Config.CODECS.keys())}")
     logger.info(f"Available resolutions: {list(Config.RESOLUTIONS.keys())}")
+
+    # Detect GPU before starting
+    asyncio.get_event_loop().run_until_complete(_startup_gpu_check())
+
     app.run()

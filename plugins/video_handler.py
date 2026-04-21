@@ -15,6 +15,7 @@ from pyrogram.types import (
 from config import Config
 from database import db
 from utils.encoder import encode_video, probe_video
+from utils.gpu import detect_gpu, get_cached_gpu_info
 from utils.helpers import humanbytes, time_formatter
 
 logger = logging.getLogger(__name__)
@@ -86,17 +87,19 @@ def register_video_handler(app: Client):
             reply_markup=_codec_keyboard(),
         )
 
-    @app.on_callback_query(filters.regex(r"^pick_codec_(hevc|av1)$"))
+    @app.on_callback_query(filters.regex(r"^pick_codec_(h264|hevc|av1)$"))
     async def pick_codec_cb(client: Client, query: CallbackQuery):
         codec = query.data.split("_")[-1]
+        codec_cfg = Config.CODECS.get(codec, {})
+        label = codec_cfg.get("label", codec.upper())
         await query.message.edit_text(
-            f"**Codec:** `{codec.upper()}`\n\n"
+            f"**Codec:** `{label}`\n\n"
             "Now select **resolution**:\n"
             "_(Choose 'Original' to keep source resolution)_",
             reply_markup=_resolution_keyboard(codec),
         )
 
-    @app.on_callback_query(filters.regex(r"^pick_res_(hevc|av1)_(none|1080p|2k|4k|8k)$"))
+    @app.on_callback_query(filters.regex(r"^pick_res_(h264|hevc|av1)_(none|1080p|2k|4k|8k)$"))
     async def pick_res_cb(client: Client, query: CallbackQuery):
         parts = query.data.split("_")
         codec = parts[2]
@@ -159,10 +162,21 @@ async def start_encode(
         return
 
     res_label = resolution.upper() if resolution else "Original"
+    codec_cfg = Config.CODECS.get(codec, {})
+    codec_label = codec_cfg.get("label", codec.upper())
+
+    # Show GPU status
+    gpu_info = get_cached_gpu_info()
+    if gpu_info and gpu_info["available"]:
+        hw_badge = f"🚀 GPU: {gpu_info['gpu_name']}"
+    else:
+        hw_badge = "⚙️ CPU mode"
+
     await query.message.edit_text(
         f"✅ **Encoding started!**\n\n"
-        f"**Codec:** {codec.upper()}\n"
+        f"**Codec:** {codec_label}\n"
         f"**Resolution:** {res_label}\n"
+        f"**Engine:** {hw_badge}\n"
         f"⏳ Downloading..."
     )
 
@@ -207,12 +221,23 @@ async def _encode_pipeline(
             return
 
         input_size = os.path.getsize(input_path)
+        # Detect GPU for this encode
+        gpu_info = await detect_gpu()
+        if gpu_info["available"]:
+            hw_badge = f"🚀 GPU ({gpu_info['gpu_name']})"
+        else:
+            hw_badge = "⚙️ CPU"
+
+        codec_cfg = Config.CODECS.get(codec, {})
+        codec_label = codec_cfg.get("label", codec.upper())
+
         await status_msg.edit_text(
             f"📥 Downloaded: {humanbytes(input_size)}\n"
             f"📐 Source: {info['width']}×{info['height']} ({info['codec']})\n"
             f"⏱ Duration: {time_formatter(info['duration'])}\n\n"
-            f"🔄 **Encoding to {codec.upper()}...**\n"
-            f"Resolution: {resolution.upper() if resolution else 'Original'}\n\n"
+            f"🔄 **Encoding to {codec_label}...**\n"
+            f"Resolution: {resolution.upper() if resolution else 'Original'}\n"
+            f"Engine: {hw_badge}\n\n"
             f"`[░░░░░░░░░░░░]` 0%"
         )
 
@@ -237,7 +262,8 @@ async def _encode_pipeline(
 
             try:
                 await status_msg.edit_text(
-                    f"🔄 **Encoding to {codec.upper()}...**\n\n"
+                    f"🔄 **Encoding to {codec_label}...**\n"
+                    f"Engine: {hw_badge}\n\n"
                     f"`[{bar}]` {pct:.1f}%\n"
                     f"⏱ Elapsed: {time_formatter(elapsed)}"
                 )
@@ -400,7 +426,10 @@ async def _ul_progress(current, total, message, start_time):
 def _codec_keyboard():
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("H.264", callback_data="pick_codec_h264"),
             InlineKeyboardButton("H.265 (HEVC)", callback_data="pick_codec_hevc"),
+        ],
+        [
             InlineKeyboardButton("AV1", callback_data="pick_codec_av1"),
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel_encode")],
@@ -408,6 +437,12 @@ def _codec_keyboard():
 
 
 def _resolution_keyboard(codec: str):
+    # Show GPU badge in resolution selection
+    gpu_info = get_cached_gpu_info()
+    gpu_note = ""
+    if gpu_info and gpu_info["available"]:
+        gpu_note = f"\n🚀 GPU acceleration active ({gpu_info['gpu_name']})"
+
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Original", callback_data=f"pick_res_{codec}_none")],
         [
