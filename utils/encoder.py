@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 async def probe_video(filepath: str) -> dict | None:
-    """Get video metadata using ffprobe."""
+    """Get full video metadata using ffprobe — including audio codec."""
     cmd = [
         Config.FFPROBE_PATH,
         "-v", "quiet",
@@ -27,11 +27,18 @@ async def probe_video(filepath: str) -> dict | None:
         return None
     try:
         data = json.loads(stdout)
+        streams = data.get("streams", [])
         video_stream = next(
-            (s for s in data.get("streams", []) if s["codec_type"] == "video"), None
+            (s for s in streams if s["codec_type"] == "video"), None
         )
         if not video_stream:
             return None
+
+        audio_stream = next(
+            (s for s in streams if s["codec_type"] == "audio"), None
+        )
+        has_subtitles = any(s["codec_type"] == "subtitle" for s in streams)
+
         return {
             "width": int(video_stream.get("width", 0)),
             "height": int(video_stream.get("height", 0)),
@@ -40,6 +47,8 @@ async def probe_video(filepath: str) -> dict | None:
             "bitrate": int(data.get("format", {}).get("bit_rate", 0)),
             "size": int(data.get("format", {}).get("size", 0)),
             "fps": _parse_fps(video_stream.get("r_frame_rate", "0/1")),
+            "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
+            "has_subtitles": has_subtitles,
         }
     except (json.JSONDecodeError, StopIteration, KeyError):
         return None
@@ -66,7 +75,6 @@ async def _pick_encoder(codec: str) -> tuple[str, list[str], bool]:
     gpu_variant = codec_cfg.get("gpu", {})
     cpu_variant = codec_cfg["cpu"]
 
-    # Try GPU if available and the specific NVENC encoder verified working
     if (
         gpu_info["available"]
         and gpu_variant
@@ -79,13 +87,76 @@ async def _pick_encoder(codec: str) -> tuple[str, list[str], bool]:
     return cpu_variant["encoder"], list(cpu_variant["params"]), False
 
 
-def _build_scale_filter(w: int, h: int) -> str:
-    """Build a CPU scale + pad filter string (works everywhere)."""
+def _build_scale_filter(w: int, h: int, fast: bool = False) -> str:
+    """
+    Build a scale + pad filter.
+    fast=True uses bilinear (speed), fast=False uses bicubic (quality).
+    """
+    flags = "fast_bilinear" if fast else "bicubic"
     return (
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags={flags},"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
         f"setsar=1"
     )
+
+
+def _build_audio_args(audio_codec: str | None) -> list[str]:
+    """
+    Smart audio handling: copy if the codec is compatible, re-encode only if needed.
+    Copying audio is instant vs re-encoding which wastes CPU time.
+    """
+    if audio_codec and audio_codec in Config.AUDIO_COPY_CODECS:
+        logger.info(f"Audio: copying {audio_codec} (no re-encode needed)")
+        return ["-c:a", "copy"]
+    else:
+        logger.info(f"Audio: re-encoding {audio_codec or 'unknown'} → opus")
+        return ["-c:a", "libopus", "-b:a", "128k"]
+
+
+def _build_ffmpeg_cmd(
+    input_path: str,
+    output_path: str,
+    encoder_name: str,
+    encoder_params: list[str],
+    resolution: str | None,
+    probe_info: dict | None,
+    is_cpu_fallback: bool = False,
+) -> list[str]:
+    """Build the complete ffmpeg command with all optimizations."""
+    cmd = [Config.FFMPEG_PATH, "-y", "-threads", "0", "-i", input_path]
+
+    # ── Video filter ─────────────────────────────────────────────
+    if resolution:
+        res = Config.RESOLUTIONS.get(resolution)
+        if res:
+            w, h = res
+            # Use fast scaling for CPU to save time
+            cmd += ["-vf", _build_scale_filter(w, h, fast=is_cpu_fallback)]
+
+    # ── Video codec ──────────────────────────────────────────────
+    cmd += ["-c:v", encoder_name]
+    cmd += encoder_params
+
+    # ── Audio handling (copy when possible) ──────────────────────
+    audio_codec = probe_info.get("audio_codec") if probe_info else None
+    cmd += _build_audio_args(audio_codec)
+
+    # ── Stream mapping ───────────────────────────────────────────
+    # Map video + audio + subtitles explicitly (skip data/attachment
+    # streams that can cause ffmpeg errors and slowdowns)
+    cmd += ["-map", "0:v:0"]                     # first video stream
+    if audio_codec:
+        cmd += ["-map", "0:a?"]                  # all audio streams (if any)
+    if probe_info and probe_info.get("has_subtitles"):
+        cmd += ["-map", "0:s?"]                  # subtitles (optional)
+        cmd += ["-c:s", "copy"]
+
+    # ── Performance flags ────────────────────────────────────────
+    cmd += ["-max_muxing_queue_size", "1024"]     # prevent muxing stalls
+    cmd += ["-progress", "pipe:1"]
+    cmd.append(output_path)
+
+    return cmd
 
 
 async def encode_video(
@@ -99,10 +170,6 @@ async def encode_video(
     Encode a video with the given codec and optional upscale resolution.
     Automatically uses GPU (NVENC) for encoding if available, CPU otherwise.
 
-    Strategy: CPU decode + GPU/CPU encode. This is the most compatible
-    approach — NVENC encoding is the bottleneck anyway, so GPU encoding
-    alone gives the bulk of the speedup without CUDA filter headaches.
-
     Returns (success: bool, message: str).
     """
     try:
@@ -112,38 +179,15 @@ async def encode_video(
 
     hw_label = "GPU" if is_gpu else "CPU"
 
-    # Build ffmpeg command — NO hwaccel flags, just GPU encoding
-    cmd = [Config.FFMPEG_PATH, "-y", "-i", input_path]
+    # Probe input for smart audio/stream handling
+    probe_info = await probe_video(input_path)
+    total_duration = probe_info["duration"] if probe_info else 0
 
-    # Video filters (standard CPU scale — works with both GPU and CPU encoding)
-    if resolution:
-        res = Config.RESOLUTIONS.get(resolution)
-        if not res:
-            return False, f"Unknown resolution: {resolution}"
-        w, h = res
-        cmd += ["-vf", _build_scale_filter(w, h)]
-
-    # Codec settings
-    cmd += ["-c:v", encoder_name]
-    cmd += encoder_params
-
-    # Audio: re-encode to opus
-    cmd += ["-c:a", "libopus", "-b:a", "128k"]
-
-    # Subtitle copy (if container supports)
-    cmd += ["-c:s", "copy"]
-
-    # Map all streams
-    cmd += ["-map", "0"]
-
-    # Progress tracking via pipe
-    cmd += ["-progress", "pipe:1"]
-
-    cmd.append(output_path)
-
-    # Get input duration for progress
-    probe = await probe_video(input_path)
-    total_duration = probe["duration"] if probe else 0
+    cmd = _build_ffmpeg_cmd(
+        input_path, output_path,
+        encoder_name, encoder_params,
+        resolution, probe_info,
+    )
 
     logger.info(f"Encoding [{hw_label}]: {' '.join(cmd)}")
 
@@ -154,57 +198,37 @@ async def encode_video(
     )
 
     start_time = time.time()
-    current_time_us = 0
 
-    # Read progress from stdout
-    async def read_progress():
-        nonlocal current_time_us
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            line = line.decode("utf-8", errors="ignore").strip()
-            if line.startswith("out_time_us="):
-                try:
-                    current_time_us = int(line.split("=")[1])
-                except ValueError:
-                    pass
-                if progress_callback and total_duration > 0:
-                    pct = min(
-                        (current_time_us / 1_000_000) / total_duration * 100, 99.9
-                    )
-                    elapsed = time.time() - start_time
-                    await progress_callback(pct, elapsed)
-
-    await read_progress()
+    await _read_progress(proc, total_duration, start_time, progress_callback)
     _, stderr = await proc.communicate()
 
     if proc.returncode != 0:
         err = stderr.decode("utf-8", errors="ignore")[-500:]
-
-        # If GPU encoding failed, retry with CPU fallback
         if is_gpu:
-            logger.warning(
-                f"GPU encoding failed (code {proc.returncode}): {err[-200:]}"
-            )
+            logger.warning(f"GPU encoding failed (code {proc.returncode}): {err[-200:]}")
             logger.info("Retrying with CPU encoder...")
             return await _encode_cpu_fallback(
-                input_path, output_path, codec, resolution, progress_callback
+                input_path, output_path, codec, resolution,
+                progress_callback, probe_info,
             )
-
         return False, f"FFmpeg error (code {proc.returncode}):\n{err}"
 
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         if is_gpu:
             logger.warning("GPU encoding produced empty output, falling back to CPU")
             return await _encode_cpu_fallback(
-                input_path, output_path, codec, resolution, progress_callback
+                input_path, output_path, codec, resolution,
+                progress_callback, probe_info,
             )
         return False, "Encoding produced empty output."
 
     elapsed = time.time() - start_time
     out_size = os.path.getsize(output_path)
-    return True, f"Done in {elapsed:.1f}s ({hw_label}) — output {out_size} bytes"
+    speed = total_duration / elapsed if elapsed > 0 else 0
+    return True, (
+        f"Done in {elapsed:.1f}s ({hw_label}) — "
+        f"{speed:.1f}x realtime — output {out_size} bytes"
+    )
 
 
 async def _encode_cpu_fallback(
@@ -213,6 +237,7 @@ async def _encode_cpu_fallback(
     codec: str,
     resolution: str | None,
     progress_callback,
+    probe_info: dict | None = None,
 ) -> tuple[bool, str]:
     """CPU-only encoding fallback when GPU fails."""
     codec_cfg = Config.CODECS.get(codec)
@@ -221,25 +246,16 @@ async def _encode_cpu_fallback(
 
     cpu = codec_cfg["cpu"]
 
-    cmd = [Config.FFMPEG_PATH, "-y", "-i", input_path]
+    if probe_info is None:
+        probe_info = await probe_video(input_path)
+    total_duration = probe_info["duration"] if probe_info else 0
 
-    # Video filters (CPU path)
-    if resolution:
-        res = Config.RESOLUTIONS.get(resolution)
-        if res:
-            w, h = res
-            cmd += ["-vf", _build_scale_filter(w, h)]
-
-    cmd += ["-c:v", cpu["encoder"]]
-    cmd += cpu["params"]
-    cmd += ["-c:a", "libopus", "-b:a", "128k"]
-    cmd += ["-c:s", "copy"]
-    cmd += ["-map", "0"]
-    cmd += ["-progress", "pipe:1"]
-    cmd.append(output_path)
-
-    probe = await probe_video(input_path)
-    total_duration = probe["duration"] if probe else 0
+    cmd = _build_ffmpeg_cmd(
+        input_path, output_path,
+        cpu["encoder"], cpu["params"],
+        resolution, probe_info,
+        is_cpu_fallback=True,
+    )
 
     logger.info(f"Encoding [CPU fallback]: {' '.join(cmd)}")
 
@@ -251,23 +267,7 @@ async def _encode_cpu_fallback(
 
     start_time = time.time()
 
-    async def read_progress():
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            line = line.decode("utf-8", errors="ignore").strip()
-            if line.startswith("out_time_us="):
-                try:
-                    t = int(line.split("=")[1])
-                except ValueError:
-                    continue
-                if progress_callback and total_duration > 0:
-                    pct = min((t / 1_000_000) / total_duration * 100, 99.9)
-                    elapsed = time.time() - start_time
-                    await progress_callback(pct, elapsed)
-
-    await read_progress()
+    await _read_progress(proc, total_duration, start_time, progress_callback)
     _, stderr = await proc.communicate()
 
     if proc.returncode != 0:
@@ -279,4 +279,26 @@ async def _encode_cpu_fallback(
 
     elapsed = time.time() - start_time
     out_size = os.path.getsize(output_path)
-    return True, f"Done in {elapsed:.1f}s (CPU fallback) — output {out_size} bytes"
+    speed = total_duration / elapsed if elapsed > 0 else 0
+    return True, (
+        f"Done in {elapsed:.1f}s (CPU fallback) — "
+        f"{speed:.1f}x realtime — output {out_size} bytes"
+    )
+
+
+async def _read_progress(proc, total_duration, start_time, progress_callback):
+    """Read ffmpeg progress output and call the callback."""
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        line = line.decode("utf-8", errors="ignore").strip()
+        if line.startswith("out_time_us="):
+            try:
+                current_us = int(line.split("=")[1])
+            except ValueError:
+                continue
+            if progress_callback and total_duration > 0:
+                pct = min((current_us / 1_000_000) / total_duration * 100, 99.9)
+                elapsed = time.time() - start_time
+                await progress_callback(pct, elapsed)

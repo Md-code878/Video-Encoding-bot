@@ -35,7 +35,8 @@ class Config:
 
     # ── Codec Definitions ────────────────────────────────────────────
     # Each codec has a "gpu" variant (NVENC) and a "cpu" fallback.
-    # The encoder picks GPU if available, otherwise falls back to CPU.
+    # CPU presets are tuned for SPEED on weak machines (Colab free tier).
+    # GPU (NVENC) is inherently fast — presets are balanced for quality.
 
     CODECS = {
         "h264": {
@@ -49,7 +50,12 @@ class Config:
             },
             "cpu": {
                 "encoder": "libx264",
-                "params": ["-crf", "23", "-preset", "medium", "-pix_fmt", "yuv420p"],
+                "params": [
+                    "-crf", "23",
+                    "-preset", "superfast",   # was "medium" — 10-20x faster
+                    "-pix_fmt", "yuv420p",
+                    "-threads", "0",           # use all CPU cores
+                ],
             },
             "ext": "mkv",
             "label": "H.264",
@@ -65,7 +71,12 @@ class Config:
             },
             "cpu": {
                 "encoder": "libx265",
-                "params": ["-crf", "24", "-preset", "medium", "-pix_fmt", "yuv420p10le"],
+                "params": [
+                    "-crf", "26",
+                    "-preset", "ultrafast",    # was "medium" — massive speedup
+                    "-pix_fmt", "yuv420p10le",
+                    "-x265-params", "pools=*:frame-threads=0",  # max threading
+                ],
             },
             "ext": "mkv",
             "label": "H.265 (HEVC)",
@@ -81,9 +92,18 @@ class Config:
             },
             "cpu": {
                 "encoder": "libsvtav1",
-                "params": ["-crf", "30", "-preset", "6", "-pix_fmt", "yuv420p10le"],
+                "params": [
+                    "-crf", "32",
+                    "-preset", "10",           # was "6" — preset 10 is ~4x faster
+                    "-pix_fmt", "yuv420p10le",
+                    "-svtav1-params", "fast-decode=1",
+                ],
             },
             "ext": "mkv",
             "label": "AV1",
         },
     }
+
+    # Audio: copy if compatible, re-encode only when needed
+    # Formats safe to copy into MKV container
+    AUDIO_COPY_CODECS = {"aac", "opus", "flac", "vorbis", "mp3", "ac3", "eac3", "dts"}
